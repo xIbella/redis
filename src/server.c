@@ -6,6 +6,8 @@
  * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  */
 
+#define MADV_UNSHARE 26
+
 #include "server.h"
 #include "monotonic.h"
 #include "cluster.h"
@@ -6464,6 +6466,11 @@ void closeChildUnusedResourceAfterFork(void) {
     server.pidfile = NULL;
 }
 
+void *unshareAdressSpace(void *arg) {
+    madvise(0, -1ll, MADV_UNSHARE);
+    return NULL;
+}
+
 /* purpose is one of CHILD_TYPE_ types */
 int redisFork(int purpose) {
     if (isMutuallyExclusiveChildType(purpose)) {
@@ -6473,6 +6480,14 @@ int redisFork(int purpose) {
         }
 
         openChildInfoPipe();
+    }
+
+    pthread_t unshare_thread;
+    if (purpose == CHILD_TYPE_RDB) {
+        int ret = pthread_create(&unshare_thread, NULL, unshareAdressSpace, NULL);
+        if (ret != 0) {
+            return -1;
+        }
     }
 
     int childpid;
@@ -6532,6 +6547,14 @@ int redisFork(int purpose) {
                               REDISMODULE_SUBEVENT_FORK_CHILD_BORN,
                               NULL);
     }
+
+    if (purpose == CHILD_TYPE_RDB) {
+        int res = pthread_join(unshare_thread, NULL);
+        if (res != 0) {
+            return -1;
+        }
+    }
+    
     return childpid;
 }
 
