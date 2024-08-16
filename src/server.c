@@ -6467,7 +6467,9 @@ void closeChildUnusedResourceAfterFork(void) {
 }
 
 void *unshareAdressSpace(void *arg) {
-    madvise(0, -1ll, MADV_UNSHARE);
+    if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
+        fprintf(stderr, "madvise failed. ERROR: %s\n", strerror(errno));
+    }
     return NULL;
 }
 
