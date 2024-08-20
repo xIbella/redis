@@ -6466,13 +6466,6 @@ void closeChildUnusedResourceAfterFork(void) {
     server.pidfile = NULL;
 }
 
-void *unshareAdressSpace(void *arg) {
-    if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
-        fprintf(stderr, "madvise failed. ERROR: %s\n", strerror(errno));
-    }
-    return NULL;
-}
-
 /* purpose is one of CHILD_TYPE_ types */
 int redisFork(int purpose) {
     if (isMutuallyExclusiveChildType(purpose)) {
@@ -6494,18 +6487,13 @@ int redisFork(int purpose) {
          * Adjust OOM score before everything else to assist the OOM killer if
          * memory resources are low.
          */
- /*        
-         pthread_t unshare_thread;
-        if (purpose == CHILD_TYPE_RDB) {
-            int ret = pthread_create(&unshare_thread, NULL, unshareAdressSpace, NULL);
-            if (ret != 0) {
-                return -1;
+/*
+         if (purpose == CHILD_TYPE_RDB) {
+            if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
+                fprintf(stderr, "madvise failed. ERROR: %s\n", strerror(errno));
             }
         }
- */
-        if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
-            fprintf(stderr, "madvise failed. ERROR: %s\n", strerror(errno));
-        }
+*/
         server.in_fork_child = purpose;
         setupChildSignalHandlers();
         setOOMScoreAdj(CONFIG_OOM_BGCHILD);
@@ -6516,14 +6504,6 @@ int redisFork(int purpose) {
          * get a write error and exit. */
         if (server.child_info_pipe[0] != -1)
             close(server.child_info_pipe[0]);
-/*
-         if (purpose == CHILD_TYPE_RDB) {
-            int res = pthread_join(unshare_thread, NULL);
-            if (res != 0) {
-                return -1;
-            }
-        }
-*/
     } else {
         /* Parent */
         if (childpid == -1) {

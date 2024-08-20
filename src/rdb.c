@@ -6,6 +6,8 @@
  * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  */
 
+#define MADV_UNSHARE 26
+
 #include "server.h"
 #include "lzf.h"    /* LZF compression library */
 #include "zipmap.h"
@@ -25,6 +27,7 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/param.h>
+#include <sys/mman.h>
 
 /* This macro is called when the internal RDB structure is corrupt */
 #define rdbReportCorruptRDB(...) rdbReportError(1, __LINE__,__VA_ARGS__)
@@ -1633,6 +1636,14 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     return C_OK;
 }
 
+void *unshareAdressSpace(void *arg) {
+    if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
+        serverLog(LL_WARNING,"MAD_UNSHARE failed: madvise: %s",
+                strerror(errno));
+    }
+    return NULL;
+}
+
 int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     pid_t childpid;
 
@@ -1646,9 +1657,31 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         int retval;
 
         /* Child */
+        /*
+        if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
+            serverLog(LL_WARNING,"MAD_UNSHARE failed: madvise: %s",
+                strerror(errno));
+        }
+        */
+        pthread_t unshare_thread;
+        int retThread = pthread_create(&unshare_thread, NULL, unshareAdressSpace, NULL);
+        if (retThread != 0) {
+            serverLog(LL_WARNING,"Cannot create unshare thread: pthread_create: %s",
+                strerror(errno));
+            return C_ERR;
+        }
+        
         redisSetProcTitle("redis-rdb-bgsave");
         redisSetCpuAffinity(server.bgsave_cpulist);
         retval = rdbSave(req, filename,rsi,rdbflags);
+
+        retThread = pthread_join(unshare_thread, NULL);
+        if (retThread != 0) {
+            serverLog(LL_WARNING,"Cannot join unshare thread: pthread_join: %s",
+                strerror(errno));
+            return C_ERR;
+        }
+
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
