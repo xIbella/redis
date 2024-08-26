@@ -1636,9 +1636,81 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     return C_OK;
 }
 
+void *populate_write(void *arg) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    int LINE_SIZE = 256;
+    char line[LINE_SIZE];
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long start, end;
+        char perms[5];
+        int offset, dev_major, dev_minor;
+        int inode;
+        
+        if (sscanf(line, "%lx-%lx %4s %x %x:%x %d",
+                   &start, &end, perms, &offset, &dev_major, &dev_minor, &inode) < 7) {
+            continue; // skip lines that don't match the expected format
+        }
+
+        if (perms[0] == 'r' && perms[1] == 'w' && perms[2] == '-') {
+            // Writeable region found
+            size_t length = end - start;
+            void *addr = (void *)start;
+
+            if (madvise(addr, length, MADV_POPULATE_WRITE) != 0) {
+                perror("madvise");
+            }
+        }
+    }
+
+    fclose(maps);
+    return NULL;
+}
+
+static double time_diff(struct timespec start, struct timespec end, const char *res_in_ms) {
+    struct timespec delta;
+
+    // Calculate the difference in seconds and nanoseconds
+    delta.tv_sec = end.tv_sec - start.tv_sec;
+    delta.tv_nsec = end.tv_nsec - start.tv_nsec;
+
+    // Adjust for negative nanoseconds
+    if (delta.tv_nsec < 0) {
+        delta.tv_nsec += 1000000000ull;
+        delta.tv_sec--;
+    }
+
+    double res;
+
+    if (strcmp(res_in_ms, "s") == 0) {
+        // Result in seconds
+        res = (double) delta.tv_sec + (double) delta.tv_nsec * 1.e-9;
+    } else if (strcmp(res_in_ms, "ms") == 0) {
+        // Result in milliseconds
+        res = (double) delta.tv_sec * 1000.0 + (double) delta.tv_nsec * 1.e-6;
+    } else {
+        // Result in microseconds
+        res = (double) delta.tv_sec * 1000000.0 + (double) delta.tv_nsec * 1.e-3;
+    }
+    return res;
+}
+
 void *unshareAdressSpace(void *arg) {
-    if (madvise(0, -4096ll, MADV_UNSHARE) == -1) {
-        serverLog(LL_WARNING,"MAD_UNSHARE failed: madvise: %s",
+    struct timespec start, end;
+    char* unit = "ms";
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int ret = madvise(0, -4096ll, MADV_UNSHARE);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    serverLog(LL_NOTICE, "Time to unshare %f%s", time_diff(start, end, unit), unit);
+
+    if (ret == -1) {
+        serverLog(LL_WARNING,"MADV_UNSHARE failed: madvise: %s",
                 strerror(errno));
     }
     return NULL;
@@ -1663,6 +1735,8 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
                 strerror(errno));
         }
         */
+
+        /*Start unshare thread*/
         pthread_t unshare_thread;
         int retThread = pthread_create(&unshare_thread, NULL, unshareAdressSpace, NULL);
         if (retThread != 0) {
@@ -1673,13 +1747,37 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         
         redisSetProcTitle("redis-rdb-bgsave");
         redisSetCpuAffinity(server.bgsave_cpulist);
-        retval = rdbSave(req, filename,rsi,rdbflags);
 
+        /*Capture time needed for rdbSave()*/
+        struct timespec start, end;
+        char* unit = "s";
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        retval = rdbSave(req, filename,rsi,rdbflags);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        serverLog(LL_NOTICE, "Time for rdbSave(): %f%s", time_diff(start, end, unit), unit);
+
+        /*Join unshare thread*/
         retThread = pthread_join(unshare_thread, NULL);
         if (retThread != 0) {
             serverLog(LL_WARNING,"Cannot join unshare thread: pthread_join: %s",
                 strerror(errno));
             return C_ERR;
+        }
+
+        /* Check Private_Clean memory */
+        FILE *smaps = fopen("/proc/self/smaps_rollup", "r");
+        if (smaps) {
+            char line[256];
+            while (fgets(line, sizeof(line), smaps)) {
+                if (strncmp(line, "Private_Clean:", 14) == 0) {
+                    serverLog(LL_NOTICE, "Private_Clean memory after unshare: %s", line + 14);
+                    break;
+                }
+            }
+            fclose(smaps);
+        } else {
+            serverLog(LL_WARNING, "Failed to open /proc/self/smaps_rollup");
         }
 
         if (retval == C_OK) {
